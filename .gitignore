@@ -1,14 +1,22 @@
-# 日志
-*.log
-# 临时文件
-*.tmp
-*.swp
-# 依赖目录
-node_modules/
+# 数据集（体积太大不上传）
+datasets/*
+!datasets/README.md
+
+# 训练产物
+checkpoints/
+logs/
+test_results/
+
+# Python 缓存
 __pycache__/
 *.pyc
-# 环境配置（可能含密码/密钥）
+*.pyo
+.pytest_cache/
+
+# 环境
 .env
+*.egg-info/
+
 # 系统文件
 .DS_Store
 Thumbs.db

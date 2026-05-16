@@ -27,7 +27,7 @@ from data.datasets import PairedDataset
 def get_transforms(config, train=True):
     if train:
         return transforms.Compose([
-            transforms.Resize(config.data.train_size),
+            transforms.Resize([int(s * 1.15) for s in config.data.train_size]),
             transforms.RandomCrop(config.data.train_size),
             transforms.RandomHorizontalFlip(p=config.data.horizontal_flip_prob),
             transforms.RandomVerticalFlip(p=config.data.vertical_flip_prob),

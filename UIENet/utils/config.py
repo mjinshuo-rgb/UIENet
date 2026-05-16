@@ -32,4 +32,4 @@ def load_config(config_path):
         raise FileNotFoundError(f"配置文件不存在: {config_path}")
 
     conf = OmegaConf.load(config_path)
-    return confc
+    return conf

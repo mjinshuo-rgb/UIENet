@@ -51,7 +51,6 @@ phase3:
 data:
   train_dirs:
     - "./datasets/EUVP/train"
-    - "./datasets/UFO120/train"
     - "./datasets/UIEB/train_filtered"
   test_dirs:
     euvp: "./datasets/EUVP/test"
