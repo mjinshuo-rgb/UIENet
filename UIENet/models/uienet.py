@@ -12,7 +12,7 @@ UIENet: 水下图像增强主网络
 import torch
 import torch.nn as nn
 from models.phase1 import Phase1
-from models.phase2 import Phase2
+from models.phase2_module import Phase2
 from models.phase3 import Phase3
 
 
