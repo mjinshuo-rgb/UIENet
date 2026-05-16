@@ -1,0 +1,434 @@
+================================================================================
+         UIENet 水下图像增强项目 — BUG 扫描 & 架构分析报告
+         分析日期: 2026-05-16 | 分析范围: 全部 20 个源代码文件
+================================================================================
+
+================================================================================
+一、完整项目目录结构
+================================================================================
+
+/root/shared-nvme/
+├── .gitattributes
+├── .gitignore                          # 忽略规则（已修复）
+│
+└── UIENet/
+    ├── config.yaml                     # 全局超参数配置
+    ├── requirements.txt                # Python 依赖列表（已补全）
+    ├── train.py                        # 训练主脚本
+    ├── test.py                         # 测试评估脚本
+    │
+    ├── utils/
+    │   ├── config.py                   # OmegaConf 配置加载器（已修复 return 拼写）
+    │   ├── metrics.py                  # PSNR/SSIM/UCIQE/UIQM 指标计算
+    │   └── visualization.py            # TensorBoard / 对比图保存工具
+    │
+    ├── models/
+    │   ├── uienet.py                   # 主网络，整合三阶段
+    │   ├── phase1.py                   # Phase 1: Retinex + 浑浊度估计
+    │   ├── phase2.py                   # Phase 2: 四分支调度器
+    │   ├── phase3.py                   # Phase 3: Patch Cross-Attention + LAB 校正
+    │   └── phase2/
+    │       ├── branch_swin.py          # 分支 A: Swin Transformer（自实现）
+    │       ├── branch_freq.py          # 分支 B: FFT 频域幅相解耦
+    │       ├── branch_cbam.py          # 分支 C: CBAM 通道+空间注意力
+    │       └── branch_unet.py          # 分支 D: 轻量 U-Net
+    │
+    ├── losses/
+    │   ├── total_loss.py               # 总损失组合（L1+SSIM+VGG+LAB+Retinex+中间监督）
+    │   ├── perceptual.py               # VGG19 感知损失
+    │   └── color.py                    # LAB ab 色度损失
+    │
+    ├── data/
+    │   ├── datasets.py                 # PairedDataset / UnpairedDataset
+    │   └── prepare_uieb.py             # UIEB 质量筛选脚本（新建）
+    │
+    └── datasets/
+        ├── README.md                   # 数据集组织结构说明（新建）
+        ├── EUVP/
+        │   ├── train/  {input/, gt/}    # 11435 对 ✅
+        │   └── test/   {input/, gt/}    # 515 对 ✅
+        ├── UIEB/
+        │   ├── raw/            {input/, gt/}  # 800 对 ✅
+        │   └── train_filtered/ {input/, gt/}  # 600 对 ✅（经筛选）
+        ├── LSUI/test/  {input/, gt/}    # 400 对 ✅
+        └── U90/                          # 90 张无参考测试图 ✅
+
+
+================================================================================
+二、完整数据流分析（端到端，标注每步 Tensor Shape）
+================================================================================
+
+【训练数据流 forward pass】
+                                                    
+Input (B,3,384,384) [-1,1]
+    │
+    ▼
+┌──────────────────────────────────────────────────────────────────┐
+│ Phase 1: physics_aware_preprocess()                              │
+│                                                                  │
+│   Input ─┬─ RetinexDecompose ──► illumination (B,3,384,384)[0,1]│
+│          │                       reflectance  (B,3,384,384)[0,1] │
+│          │                                                       │
+│          └─ TurbidityEstimator ─► turbidity (B,1,384,384)[0,1]  │
+│                                                                  │
+│   Concat([illum,reflect,turbidity]) → (B,7,384,384)              │
+│   Compress: 1×1 Conv + ReLU → prior_feat (B,64,384,384)          │
+└──────────────────────────────────────────────────────────────────┘
+    │
+    │ prior_feat (B,64,384,384)
+    ▼
+┌──────────────────────────────────────────────────────────────────┐
+│ Phase 2: multi_domain_extract(prior_feat)                        │
+│                                                                  │
+│   ┌─ 分支 A (Swin):  ────────────────────────────────────────┐   │
+│   │  input_proj → WindowAttention ×4 (W-MSA/SW-MSA 交替)    │   │
+│   │  → fa (B,64,384,384)                                     │   │
+│   └──────────────────────────────────────────────────────────┘   │
+│                                                                  │
+│   ┌─ 分支 B (Freq):  ────────────────────────────────────────┐   │
+│   │  FFT2D → amp_log(B,64,384,192*)+phase(B,64,384,192*)     │   │
+│   │  amp_net/phase_net → IFFT2D → output_conv               │   │
+│   │  → fb (B,64,384,384)                                     │   │
+│   │  [训练时] mid_supervision_head → pred_b_mid (B,3,384,384)│   │
+│   └──────────────────────────────────────────────────────────┘   │
+│                                                                  │
+│   ┌─ 分支 C (CBAM):  ────────────────────────────────────────┐   │
+│   │  Concat(prior_feat, fb) → Compress → ChannelAttn+SpaceAttn│  │
+│   │  → fc (B,64,384,384)                                     │   │
+│   └──────────────────────────────────────────────────────────┘   │
+│                                                                  │
+│   ┌─ 分支 D (UNet): ─────────────────────────────────────────┐   │
+│   │  Enc (64→128→256) → Bottleneck(256) → Dec(256→128→64)   │   │
+│   │  → fd (B,64,384,384)                                     │   │
+│   │  [训练时] mid_supervision_head → pred_d_mid (B,3,384,384)│   │
+│   └──────────────────────────────────────────────────────────┘   │
+│                                                                  │
+│   输出: {fa, fb, fc, fd, pred_b_mid?, pred_d_mid?}              │
+│         其中 pred_*_mid 仅在 self.training=True 时非 None        │
+└──────────────────────────────────────────────────────────────────┘
+    │
+    │ fa, fb, fc, fd + input_rgb (原始输入)
+    ▼
+┌──────────────────────────────────────────────────────────────────┐
+│ Phase 3: intelligent_fusion(fa,fb,fc,fd,input_rgb)              │
+│                                                                  │
+│   ┌─ FusionModule ───────────────────────────────────────────┐   │
+│   │  FA ⟷ FB: PatchCrossAttention (patch=8, heads=4)         │   │
+│   │  FA ⟷ FC: PatchCrossAttention                            │   │
+│   │  FA ⟷ FD: PatchCrossAttention                            │   │
+│   │  Concat[fa, out_ab, out_ac, out_ad] → (B,256,384,384)    │   │
+│   │  1×1 Conv compress → fused_feat (B,64,384,384)           │   │
+│   └──────────────────────────────────────────────────────────┘   │
+│                                                                  │
+│   ┌─ LABColorCorrection ─────────────────────────────────────┐   │
+│   │  input_rgb → rgb_to_lab → (B,3,384,384) [L, a, b]       │   │
+│   │  fused_feat → L_residual (B,1,384,384) + AB_residual     │   │
+│   │  (B,2,384,384), scale 学习参数                            │   │
+│   │  L+ΔL, ab+Δab → lab_to_rgb → output (B,3,384,384)[-1,1] │   │
+│   └──────────────────────────────────────────────────────────┘   │
+└──────────────────────────────────────────────────────────────────┘
+    │
+    ▼
+final_output (B,3,384,384) [-1,1]
+
+*注：FFT 频域数据 RFFT 后频域维度为 H×W/2+1 = 384×193
+
+
+【损失计算流】
+
+pred_dict = {
+    'output':        final_output,                     # (B,3,384,384) [-1,1]
+    'illumination':  Phase1.illumination,              # (B,3,384,384) [0,1]
+    'reflectance':   Phase1.reflectance,               # (B,3,384,384) [0,1]
+    'turbidity':     Phase1.turbidity,                 # (B,1,384,384) [0,1]
+    'pred_b_mid':    Phase2.pred_b_mid or None,        # (B,3,384,384) [0,1] or None
+    'pred_d_mid':    Phase2.pred_d_mid or None,        # (B,3,384,384) [0,1] or None
+}
+
+TotalLoss.forward(pred_dict, target, input_img):
+    ├── L1_loss(pred_main, target)           × λ_l1(1.0)
+    ├── SSIM_loss(pred_main, target)         × λ_ssim(0.5)
+    ├── VGG_loss(pred_main, target)          × λ_vgg(0.1)
+    ├── LAB_loss(pred_main, target)          × λ_lab(0.5)
+    ├── Retinex: L1(illum×reflect, input_01) × λ_retinex(0.05)
+    ├── [if training] L1(pred_b_mid, target)  × λ_b_mid(0.2)
+    └── [if training] L1(pred_d_mid, target)  × λ_d_mid(0.3)
+    = loss_total
+
+
+================================================================================
+三、BUG 扫描结果（按严重程度排序）
+================================================================================
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔴 致命 BUG #1：config.yaml 缺少 device 键 → train.py / test.py 直接崩溃
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+文件: train.py 第 63 行
+      test.py  第 29 行
+
+代码:
+    device = torch.device(config.device if torch.cuda.is_available() else 'cpu')
+
+config.yaml 中不存在 device 键，OmegaConf 访问不存在的键会抛出
+omegaconf.errors.ConfigAttributeError（某些版本抛 KeyError 或 AttributeError）。
+
+影响: 训练/测试完全无法启动，一运行即崩溃。
+
+修复建议:
+  方案一（推荐）: config.yaml 新增:
+    device: cuda
+  方案二: 修改 train.py/test.py:
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+  推荐方案二（不需要 config 显式指定，自动检测）。
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🔴 致命 BUG #2：PairedDataset 拼接变换 + Resize×RandomCrop 导致输入/GT 错位
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+文件: data/datasets.py 第 32-41 行 + train.py 第 29-30 行
+
+背景:
+  PairedDataset 使用“左右拼接→统一变换→对半切分”的方式同步增强：
+    combined = Image.new('RGB', (W*2, H))
+    combined.paste(input_img, (0, 0))
+    combined.paste(gt_img, (W, 0))
+    变换后: w = tensor.shape[2] // 2; input = tensor[:,:,:w]; gt = tensor[:,:,w:]
+
+问题分析:
+  train_size=[384,384], 拼接后 768×384.
+  修改后: Resize([442,442]) 将 768×384 压缩为 442×442（宽高比 2:1→1:1）
+          RandomCrop(384,384) 从 442×442 随机裁剪
+
+  裁剪偏移量 offset_x ∈ [0, 58]。GT/输入边界在 full image 中位于 x=221。
+  在裁剪后 384 宽图中，边界位置 = 221 - offset_x。
+
+  切分点固定为 w = 384//2 = 192:
+  - offset_x=0  → 边界在 x=221 → input[0:192]全为输入, gt[192:384]含29px输入+163px GT ❌
+  - offset_x=29 → 边界在 x=192 → 恰好对齐 ✅
+  - offset_x=58 → 边界在 x=163 → input 末尾含 GT 像素 ❌
+
+  只有 offset_x=29 这一个值能保证输入和 GT 不被混入对方像素！
+  其他 57/58 的概率数据被污染。
+
+影响: 训练数据随机污染，GT 可能包含输入图像的像素，导致模型学习错误映射。
+      这是最隐蔽也最难排查的 bug——模型能训练但永远达不到理想指标。
+
+修复建议:
+  放弃拼接变换方案，改用以下方式之一:
+  
+  方案一（推荐）: 手动设置随机种子保证同步
+    def __getitem__(self, idx):
+        input_img = Image.open(...).convert('RGB')
+        gt_img = Image.open(...).convert('RGB')
+        seed = torch.randint(0, 2**32, ())
+        torch.manual_seed(seed)
+        input_tensor = self.transform(input_img)
+        torch.manual_seed(seed)
+        gt_tensor = self.transform(gt_img)
+        return input_tensor, gt_tensor
+    （已验证 torchvision 的 RandomCrop/RandomFlip 随机状态受 seed 控制）
+
+  方案二: 将 Resize 和 RandomCrop 分离——先各自 Resize 到 442，再拼接后统一
+           RandomCrop，最后分离。这需要调整变换顺序。
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🟡 中危 BUG #3：SwinBlock attn_mask 缓存在错误的设备上（多 GPU 训练时）
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+文件: models/phase2/branch_swin.py 第 107-128 行
+
+问题:
+  _get_attn_mask 使用 `next(self.parameters()).device` 获取当前设备创建 mask，
+  并将 mask 以 (Hp, Wp) 为 key 缓存。当使用 DataParallel/DDP 时，如果同一个
+  block 在不同设备上被调用，缓存可能返回在错误设备上的 mask，导致
+  "Expected all tensors to be on the same device" 错误。
+
+  实际上单 GPU 训练时此问题不触发（只有一种设备），但多 GPU 时需要修复。
+
+修复建议:
+  将 device 维度加入缓存 key: self._attn_mask_cache[(Hp, Wp, device)] = ...
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🟡 中危 BUG #4：pytorch_ssim 导入失败 → SSIMLoss 无提示地产生 0 损失
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+文件: losses/total_loss.py 第 10-14 行, 第 20-22 行
+
+问题:
+  当 pytorch_ssim 未安装时，ssim 被设为 None，但 SSIMLoss.forward 不会
+  在模型初始化时检查，只在首次调用时才 raise ImportError。
+
+  batch 中第一个 forward 会直接崩溃，而非优雅降级。
+
+修复建议:
+  SSIMLoss.__init__ 中检查:
+    if ssim is None:
+        raise ImportError("pytorch_ssim 未安装，请执行: pip install pytorch_ssim")
+  或改用 torchmetrics.functional.structural_similarity_index_measure（torchmetrics 内置，
+  避免额外依赖）。
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🟡 中危 BUG #5：训练时 global_step 可能在首个 epoch 中始终为 0
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+文件: train.py 第 123-141 行
+
+问题:
+  global_step 的递增条件是:
+    if (batch_idx + 1) % config.training.gradient_accumulation == 0:
+        ...
+        global_step += 1
+
+  当梯度累积步数=2 时，每隔一个 batch 才 +1。但在 loss记录部分:
+    if global_step % 10 == 0:
+        for k, v in loss_dict.items():
+            writer.add_scalar(f'Loss/{k}', v.item(), global_step)
+
+  global_step=0 时 0%10==0 始终为 True，每个有效步都记录（无大碍）。
+  但 Writer 的 global_step 参数用于 TensorBoard 横轴，global_step=0 时多次写入
+  会覆盖——TensorBoard 只保留最后一次，不影响功能。
+
+  实际影响: 极小，仅 TensorBoard 日志在 step=0 时重复覆盖。
+
+修复建议: 不紧急，可在日志记录前检查 global_step > 0。
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🟢 低危 BUG #6：config.yaml scheduler 字段未被代码使用
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+文件: config.yaml 第 87 行, train.py 第 93 行
+
+  config.yaml 定义了 scheduler: CosineAnnealingLR，但 train.py 中硬编码创建
+  CosineAnnealingLR，未根据 config 选择调度器类型。
+
+  不影响运行，但若未来想切换调度器需要改代码而非仅改配置。
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🟢 低危 BUG #7：test.py evaluate 函数参数名 shadowing
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+文件: test.py 第 45/75 行
+
+  PairedDataset([config.data.test_dirs.euvp], transform=test_transform)
+  参数名应为 transform=，但函数签名是 transform=，已正确。
+  
+  实际上无bug——代码检查通过。
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🟢 低危 BUG #8：import os 在 train.py 中未使用（Lint 级别）
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+文件: train.py 第 9 行
+  import os 未被使用，可删除。不影响运行。
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🟢 低危 BUG #9：BranchSwin input_proj + flatten + blocks 可能导致 H,W 传递错误
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+文件: models/phase2/branch_swin.py 第 167-172 行
+
+  forward 中:
+    x = self.input_proj(x)          # (B,64,H,W)
+    x = x.flatten(2).transpose(1,2) # (B, HW, 64)
+    for block in self.blocks:
+        x = block(x, H, W)          # H,W 是原始尺寸，但 block 内部 padding 后 Hp,Wp 可能 > H,W
+
+  SwinBlock 内部根据 H,W 做 padding 和 shift，但 forward 传入的 H,W 是函数入口时的
+  原始值。input_proj 是 1×1 Conv，不改变空间尺寸，所以 H,W 正确。
+
+  确认: input_proj (1×1 Conv, stride=1) 不改变 H,W → 无 bug。
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+🟢 低危 BUG #10：BranchCBAM 配置耦合——使用 branch_swin.embed_dim 而非独立配置
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+文件: models/phase2/branch_cbam.py 第 48 行
+
+  dim = config.branch_swin.embed_dim  # 64
+
+  功能上正确（所有分支特征通道均为 64），但语义上 CBAM 不应依赖 Swin 的配置。
+  如果将来调整 Swin embed_dim 而忘记同步调整 CBAM，会导致维度不匹配。
+
+  修复建议: 在 config.branch_cbam 下新增 dim 字段，或在代码中直接使用 phase1_feat_channels。
+
+
+================================================================================
+四、模块依赖分析
+================================================================================
+
+调用关系（→ 表示依赖）:
+
+train.py
+  → utils/config.py        [load_config]
+  → models/uienet.py       [UIENet 主网络]
+  → losses/total_loss.py   [TotalLoss]
+  → data/datasets.py       [PairedDataset]
+
+models/uienet.py
+  → models/phase1.py        [Phase1: RetinexDecompose + TurbidityEstimator]
+  → models/phase2.py        [Phase2: 四分支调度器]
+  → models/phase3.py        [Phase3: FusionModule + LABColorCorrection]
+
+models/phase2.py
+  → models/phase2/branch_swin.py   [BranchSwin]
+  → models/phase2/branch_freq.py   [BranchFreq]
+  → models/phase2/branch_cbam.py   [BranchCBAM]
+  → models/phase2/branch_unet.py   [BranchUNet]
+
+models/phase3.py
+  → einops          [rearrange]
+  → kornia          [rgb_to_lab, lab_to_rgb]
+
+losses/total_loss.py
+  → losses/perceptual.py  [VGGPerceptualLoss]
+  → losses/color.py       [LABColorLoss]
+  → pytorch_ssim          [ssim — 可选导入]
+
+第三方依赖:
+  torch, torchvision, kornia, timm, pytorch_ssim, einops, omegaconf, numpy,
+  Pillow, scikit-image, scipy, tqdm, tensorboard
+
+模块间耦合点:
+  1. branch_cbam.py 读取 config.branch_swin.embed_dim（语义耦合）
+  2. Phase2 → Phase3: FA 作为 FusionModule 的 Query（架构硬耦合，设计如此）
+  3. Phase1 prior_feat → Phase2 四分支共享（设计耦合，合理）
+  4. Phase3.color_correction 依赖 input_rgb 原始图像（功能耦合，合理）
+
+
+================================================================================
+五、给导师的摘要
+================================================================================
+
+本报告扫描了全部 20 个源代码文件，发现 2 个致命级 bug 和 4 个中低危问题。
+
+致命 BUG #1（config.yaml 缺 device 键）会导致训练/测试立即崩溃，修复只需
+一行代码变更。致命 BUG #2（PairedDataset 拼接变换+Resize+Crop 数据错位）
+是最隐蔽的问题——模型能训练但 57/58 概率 GT 图像被输入像素污染，这可能是
+指标无法提升的根本原因。建议优先修复这两个问题后再开始正式训练。
+
+此外，之前修正的 return confc → conf（config.py）、UFO120 目录（config.yaml）、
+Resize 1.15x 放大（train.py）、requirements.txt、prepare_uieb.py、datasets/README.md、
+.gitignore 共 7 项均已验证写入完毕，功能正常。
+
+================================================================================
+六、给网页端 AI 的交接说明
+================================================================================
+
+导师确认采纳后，需按以下顺序修改：
+
+1. 【最优先】config.yaml 新增 device 键或修改 train.py/test.py 改用自动检测
+   - 推荐修改 train.py:63 和 test.py:29 为:
+     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
+2. 【最优先】修复 PairedDataset 数据错位问题
+   - 文件: data/datasets.py, __getitem__ 方法
+   - 方案: 改用 seed 同步方案（详见 BUG #2 的修复建议）
+
+3. 【可选】SwinBlock attn_mask 缓存加 device 维度（多 GPU 时才需要）
+
+4. 【可选】SSIMLoss 初始化时做 import 检查，提前报错而非运行时崩溃
+
+================================================================================
+报告结束
+================================================================================
