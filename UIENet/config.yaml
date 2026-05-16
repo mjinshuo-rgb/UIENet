@@ -75,8 +75,8 @@ data:
 
 # ---- 训练超参数 ----
 training:
-  batch_size: 1
-  gradient_accumulation: 8           # 等效 batch_size = 8
+  batch_size: 2
+  gradient_accumulation: 4           # 等效 batch_size = 8
   num_epochs: 100
   learning_rate: 2.0e-4              # 生成器学习率
   d_learning_rate: 1.0e-4            # 判别器学习率
