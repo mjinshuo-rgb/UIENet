@@ -4,7 +4,6 @@
 """
 
 import os
-import random
 from pathlib import Path
 from PIL import Image
 import torch
@@ -40,6 +39,7 @@ class PairedDataset(Dataset):
         gt_img = Image.open(gt_path).convert('RGB')
 
         if self.transform:
+            import random
             seed = torch.randint(0, 2**31, (1,)).item()
             torch.manual_seed(seed)
             random.seed(seed)
@@ -49,8 +49,8 @@ class PairedDataset(Dataset):
             gt_tensor = self.transform(gt_img)
             return input_tensor, gt_tensor
 
-        # 无 transform 时的兜底
-        to_tensor = transforms.ToTensor()
+        from torchvision import transforms as T
+        to_tensor = T.ToTensor()
         return to_tensor(input_img), to_tensor(gt_img)
 
 
