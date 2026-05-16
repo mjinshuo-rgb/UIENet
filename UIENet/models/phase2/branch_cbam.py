@@ -45,7 +45,7 @@ class SpatialAttention(nn.Module):
 class BranchCBAM(nn.Module):
     def __init__(self, config):
         super().__init__()
-        dim = config.branch_swin.embed_dim  # 与物理先验特征通道数一致 (64)
+        dim = config.branch_swin.embed_dim
         reduction = config.branch_cbam.reduction
         spatial_kernel = config.branch_cbam.spatial_kernel
 
@@ -54,7 +54,13 @@ class BranchCBAM(nn.Module):
 
         self.channel_attn = ChannelAttention(dim, reduction)
         self.spatial_attn = SpatialAttention(spatial_kernel)
-        self.out_conv = nn.Conv2d(dim, dim, 3, padding=1)
+
+        # FFN 精炼 + 残差
+        self.out_conv = nn.Sequential(
+            nn.Conv2d(dim, dim, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(dim, dim, 3, padding=1),
+        )
 
     def forward(self, prior_feat, fb):
         # prior_feat: (B, C, H, W) 物理先验特征
@@ -68,5 +74,5 @@ class BranchCBAM(nn.Module):
         spatial_att = self.spatial_attn(x)
         x = x * spatial_att
 
-        fc = self.out_conv(x)
+        fc = self.out_conv(x) + x  # 残差连接
         return fc

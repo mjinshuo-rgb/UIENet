@@ -25,56 +25,68 @@ class ConvBlock(nn.Module):
 class BranchUNet(nn.Module):
     def __init__(self, config):
         super().__init__()
-        base = config.branch_unet.base_channels  # 64
+        base = config.branch_unet.base_channels
         self.input_size = config.branch_unet.input_size
 
-        # 编码器（逐级下采样）
-        self.enc1 = ConvBlock(base, base)              # 不改变尺寸
-        self.enc2 = ConvBlock(base, base * 2, stride=2)  # 1/2
-        self.enc3 = ConvBlock(base * 2, base * 4, stride=2)  # 1/4
+        # 编码器（4 级下采样）
+        self.enc1 = ConvBlock(base, base)                      # H, W
+        self.enc2 = ConvBlock(base, base * 2, stride=2)        # H/2, W/2
+        self.enc3 = ConvBlock(base * 2, base * 4, stride=2)    # H/4, W/4
+        self.enc4 = ConvBlock(base * 4, base * 8, stride=2)    # H/8, W/8  [新增]
 
         # 瓶颈
-        self.bottleneck = ConvBlock(base * 4, base * 4)
+        self.bottleneck = nn.Sequential(
+            ConvBlock(base * 8, base * 8),
+            ConvBlock(base * 8, base * 8),
+        )
 
-        # 解码器（上采样 + 跳连）
+        # 解码器（逐步上采样 + 跳连）
+        self.up4 = nn.ConvTranspose2d(base * 8, base * 4, kernel_size=2, stride=2)
+        self.dec4 = nn.Sequential(
+            ConvBlock(base * 8, base * 4),   # 跳连拼接后 8C→4C
+            ConvBlock(base * 4, base * 4)
+        )
         self.up3 = nn.ConvTranspose2d(base * 4, base * 2, kernel_size=2, stride=2)
         self.dec3 = nn.Sequential(
-            ConvBlock(base * 4, base * 2),  # 输入为跳连拼接后的 4C
+            ConvBlock(base * 4, base * 2),   # 跳连拼接后 4C→2C
             ConvBlock(base * 2, base * 2)
         )
         self.up2 = nn.ConvTranspose2d(base * 2, base, kernel_size=2, stride=2)
         self.dec2 = nn.Sequential(
-            ConvBlock(base * 2, base),       # 跳连拼接后 2C
+            ConvBlock(base * 2, base),        # 跳连拼接后 2C→C
             ConvBlock(base, base)
         )
 
-        # 中间监督头（仅训练时使用）
+        # 中间监督头（从 dec3 中间层输出）
         self.mid_supervision_head = nn.Sequential(
-            nn.Conv2d(base * 2, 3, kernel_size=1),
+            nn.Conv2d(base * 2, base, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(base, 3, kernel_size=1),
             nn.Sigmoid()
         )
 
     def forward(self, x):
         # x: (B, C, H, W)
-        # 编码器
-        feat1 = self.enc1(x)          # (B, C, H, W)
-        feat2 = self.enc2(feat1)      # (B, 2C, H/2, W/2)
-        feat3 = self.enc3(feat2)      # (B, 4C, H/4, W/4)
+        feat1 = self.enc1(x)          # (B, C,   H,   W)
+        feat2 = self.enc2(feat1)      # (B, 2C,  H/2, W/2)
+        feat3 = self.enc3(feat2)      # (B, 4C,  H/4, W/4)
+        feat4 = self.enc4(feat3)      # (B, 8C,  H/8, W/8)
 
-        # 瓶颈
-        bn = self.bottleneck(feat3)   # (B, 4C, H/4, W/4)
+        bn = self.bottleneck(feat4)   # (B, 8C,  H/8, W/8)
 
-        # 解码器，逐步上采样并跳连
-        up3 = self.up3(bn)            # (B, 2C, H/2, W/2)
+        up4 = self.up4(bn)            # (B, 4C,  H/4, W/4)
+        dec4_input = torch.cat([up4, feat3], dim=1)  # (B, 8C, H/4, W/4)
+        dec4_out = self.dec4(dec4_input)             # (B, 4C, H/4, W/4)
+
+        up3 = self.up3(dec4_out)      # (B, 2C,  H/2, W/2)
         dec3_input = torch.cat([up3, feat2], dim=1)  # (B, 4C, H/2, W/2)
-        mid_feat = self.dec3(dec3_input)   # (B, 2C, H/2, W/2) 中间层特征
+        mid_feat = self.dec3(dec3_input)             # (B, 2C, H/2, W/2)
 
-        up2 = self.up2(mid_feat)      # (B, C, H, W)
+        up2 = self.up2(mid_feat)      # (B, C,   H,   W)
         dec2_input = torch.cat([up2, feat1], dim=1)  # (B, 2C, H, W)
-        fd = self.dec2(dec2_input)    # (B, C, H, W)  最终输出
+        fd = self.dec2(dec2_input)    # (B, C,   H,   W)
 
         if self.training:
-            # 中间监督：从 mid_feat 生成 3 通道图并上采样到原图尺寸
             pred_d_mid = self.mid_supervision_head(mid_feat)
             pred_d_mid = F.interpolate(pred_d_mid, size=tuple(self.input_size),
                                        mode='bilinear', align_corners=False)

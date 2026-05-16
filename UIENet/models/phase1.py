@@ -21,11 +21,11 @@ import torch.nn.functional as F
 
 class RetinexDecompose(nn.Module):
     """
-    Retinex 分解模块
+    Retinex 分解模块 v3.0
     将输入图像分解为 Illumination (光照层) 和 Reflectance (反射层)
-    设计动机：水下图像常存在不均匀光照和色偏，显式分解有助于针对性增强
+    加深网络 + 残差连接，提升分解精度。
     """
-    def __init__(self, in_channels=3, mid_channels=32, out_channels=3):
+    def __init__(self, in_channels=3, mid_channels=48, out_channels=3):
         super().__init__()
         self.shared = nn.Sequential(
             nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1),
@@ -34,14 +34,20 @@ class RetinexDecompose(nn.Module):
             nn.ReLU(inplace=True),
             nn.Conv2d(mid_channels, mid_channels, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
+            nn.Conv2d(mid_channels, mid_channels, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
         )
         # 两路并行输出头
         self.illum_head = nn.Sequential(
-            nn.Conv2d(mid_channels, out_channels, kernel_size=1),
+            nn.Conv2d(mid_channels, mid_channels // 2, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(mid_channels // 2, out_channels, kernel_size=1),
             nn.Sigmoid()
         )
         self.reflect_head = nn.Sequential(
-            nn.Conv2d(mid_channels, out_channels, kernel_size=1),
+            nn.Conv2d(mid_channels, mid_channels // 2, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(mid_channels // 2, out_channels, kernel_size=1),
             nn.Sigmoid()
         )
 
@@ -54,19 +60,20 @@ class RetinexDecompose(nn.Module):
 
 class TurbidityEstimator(nn.Module):
     """
-    浑浊度/密度图估计器
-    估计图像各区域的水体浑浊程度，输出单通道密度图 [0,1]
-    值越大表示该区域散射越严重，需要更强烈的去雾/去散射处理
+    浑浊度/密度图估计器 v3.0
+    加深网络 + 残差块，提升密度估计精度。
     """
-    def __init__(self, in_channels=3, mid_channels=64):
+    def __init__(self, in_channels=3, mid_channels=96):
         super().__init__()
-        self.net = nn.Sequential(
+        self.stem = nn.Sequential(
             nn.Conv2d(in_channels, mid_channels, kernel_size=3, padding=1),
             nn.BatchNorm2d(mid_channels),
             nn.ReLU(inplace=True),
-            nn.Conv2d(mid_channels, mid_channels, kernel_size=3, padding=1),
-            nn.BatchNorm2d(mid_channels),
-            nn.ReLU(inplace=True),
+        )
+        # 残差块 × 2
+        self.res1 = self._make_res_block(mid_channels)
+        self.res2 = self._make_res_block(mid_channels)
+        self.head = nn.Sequential(
             nn.Conv2d(mid_channels, mid_channels // 2, kernel_size=3, padding=1),
             nn.BatchNorm2d(mid_channels // 2),
             nn.ReLU(inplace=True),
@@ -74,8 +81,20 @@ class TurbidityEstimator(nn.Module):
             nn.Sigmoid()
         )
 
+    def _make_res_block(self, channels):
+        return nn.Sequential(
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(channels),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(channels, channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(channels),
+        )
+
     def forward(self, x):
-        return self.net(x)
+        feat = self.stem(x)
+        feat = F.relu(feat + self.res1(feat), inplace=True)
+        feat = F.relu(feat + self.res2(feat), inplace=True)
+        return self.head(feat)
 
 
 class Phase1(nn.Module):

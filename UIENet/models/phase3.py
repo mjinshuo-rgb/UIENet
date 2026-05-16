@@ -71,35 +71,51 @@ class PatchCrossAttention(nn.Module):
 
 
 class FusionModule(nn.Module):
-    """特征融合模块：以 FA 为 Query，分别与 FB、FC、FD 做 Patch Cross-Attention"""
+    """特征融合模块 v3.0：Cross-Attention + FFN 精炼"""
     def __init__(self, dim=64, num_heads=4, patch_size=8):
         super().__init__()
         self.ca_ab = PatchCrossAttention(dim, num_heads, patch_size)
         self.ca_ac = PatchCrossAttention(dim, num_heads, patch_size)
         self.ca_ad = PatchCrossAttention(dim, num_heads, patch_size)
-        self.fuse_conv = nn.Conv2d(dim * 4, dim, 1)
+        self.fuse_conv = nn.Sequential(
+            nn.Conv2d(dim * 4, dim, 1),
+            nn.ReLU(inplace=True),
+        )
+        # FFN 精炼
+        self.ffn = nn.Sequential(
+            nn.Conv2d(dim, dim * 2, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(dim * 2, dim, 3, padding=1),
+        )
 
     def forward(self, fa, fb, fc, fd):
         out_ab = self.ca_ab(fa, fb)
         out_ac = self.ca_ac(fa, fc)
         out_ad = self.ca_ad(fa, fd)
         fused = torch.cat([fa, out_ab, out_ac, out_ad], dim=1)
-        return self.fuse_conv(fused)
+        fused = self.fuse_conv(fused)
+        fused = self.ffn(fused) + fused  # 残差连接
+        return fused
 
 
 class LABColorCorrection(nn.Module):
-    """LAB 色彩空间自适应校正，使用可微分 RGB↔LAB 转换"""
+    """LAB 色彩空间自适应校正 v3.0：更深 + 残差"""
     def __init__(self, feat_channels=64):
         super().__init__()
+        # L 通道残差预测（更深）
         self.l_residual = nn.Sequential(
-            nn.Conv2d(feat_channels, 1, 3, padding=1),
+            nn.Conv2d(feat_channels, feat_channels // 2, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(feat_channels // 2, 1, 3, padding=1),
             nn.Tanh()
         )
+        # ab 通道残差预测（更深）
         self.ab_residual = nn.Sequential(
-            nn.Conv2d(feat_channels, 2, 3, padding=1),
+            nn.Conv2d(feat_channels, feat_channels // 2, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(feat_channels // 2, 2, 3, padding=1),
             nn.Tanh()
         )
-        # 残差缩放因子（初始值调大以保证有效色彩校正）
         self.l_scale = nn.Parameter(torch.tensor(5.0))
         self.ab_scale = nn.Parameter(torch.tensor(10.0))
 

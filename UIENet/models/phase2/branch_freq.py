@@ -23,24 +23,34 @@ class BranchFreq(nn.Module):
         self.mid_channels = config.branch_freq.mid_channels
         self.input_size = config.branch_freq.input_size  # [H, W]
 
-        # 幅度处理子网络
+        # 幅度处理子网络（残差块 + 1×1 卷积）
         self.amp_net = nn.Sequential(
-            nn.Conv2d(self.mid_channels, self.mid_channels, kernel_size=1),
+            nn.Conv2d(self.mid_channels, self.mid_channels, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
-            nn.Conv2d(self.mid_channels, self.mid_channels, kernel_size=1)
+            nn.Conv2d(self.mid_channels, self.mid_channels, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(self.mid_channels, self.mid_channels, kernel_size=1),
         )
-        # 相位处理子网络
+        # 相位处理子网络（残差块 + 1×1 卷积）
         self.phase_net = nn.Sequential(
-            nn.Conv2d(self.mid_channels, self.mid_channels, kernel_size=1),
+            nn.Conv2d(self.mid_channels, self.mid_channels, kernel_size=3, padding=1),
             nn.ReLU(inplace=True),
-            nn.Conv2d(self.mid_channels, self.mid_channels, kernel_size=1)
+            nn.Conv2d(self.mid_channels, self.mid_channels, kernel_size=3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(self.mid_channels, self.mid_channels, kernel_size=1),
         )
         # 输出卷积
-        self.output_conv = nn.Conv2d(self.mid_channels, self.mid_channels, 3, padding=1)
+        self.output_conv = nn.Sequential(
+            nn.Conv2d(self.mid_channels, self.mid_channels, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(self.mid_channels, self.mid_channels, 3, padding=1),
+        )
 
         # 中间监督头（仅训练时使用）
         self.mid_supervision_head = nn.Sequential(
-            nn.Conv2d(self.mid_channels, 3, kernel_size=1),
+            nn.Conv2d(self.mid_channels, self.mid_channels // 2, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(self.mid_channels // 2, 3, kernel_size=1),
             nn.Sigmoid()
         )
 
