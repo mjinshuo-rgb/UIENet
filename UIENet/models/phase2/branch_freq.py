@@ -47,6 +47,10 @@ class BranchFreq(nn.Module):
     def forward(self, x):
         # x: (B, C, H, W)
         B, C, H, W = x.shape
+        input_dtype = x.dtype
+
+        # cuFFT 半精度要求尺寸为 2 的幂，转为 float32 计算 FFT 以兼容任意尺寸
+        x = x.float()
 
         # 2D FFT
         x_fft = torch.fft.fft2(x)
@@ -69,6 +73,9 @@ class BranchFreq(nn.Module):
         real = amp_enhanced_exp * torch.cos(phase_enhanced)
         imag = amp_enhanced_exp * torch.sin(phase_enhanced)
         x_ifft = torch.fft.ifft2(torch.complex(real, imag)).real
+
+        # 转回原始 dtype
+        x_ifft = x_ifft.to(input_dtype)
 
         # 主特征
         fb = self.output_conv(x_ifft)
