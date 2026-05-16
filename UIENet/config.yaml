@@ -8,16 +8,16 @@ in_channels: 3
 num_classes: 3  # 输出通道数（RGB）
 
 # ---- Phase 1: 物理感知与预处理 ----
-phase1_feat_channels: 64
+phase1_feat_channels: 96
 phase1_retinex_mid_channels: 32
 phase1_density_mid_channels: 64
 
 # ---- Phase 2: 多域特征协同提取 ----
 # 分支 A: Swin Transformer
 branch_swin:
-  embed_dim: 64           # 与 phase1 输出通道一致
+  embed_dim: 96           # 与 phase1 输出通道一致
   window_size: 8
-  num_heads: 4
+  num_heads: 6
   num_layers: 4           # v2.0 升级为 4 层
   mlp_ratio: 4.0
   drop_rate: 0.0
@@ -25,7 +25,7 @@ branch_swin:
 
 # 分支 B: 频域解耦
 branch_freq:
-  mid_channels: 64
+  mid_channels: 96
   # 中间监督头输入尺寸（用于上采样到原图）
   input_size: [384, 384]
 
@@ -36,14 +36,14 @@ branch_cbam:
 
 # 分支 D: 轻量 U-Net
 branch_unet:
-  base_channels: 64
+  base_channels: 96
   # 中间监督头输入尺寸
   input_size: [384, 384]
 
 # ---- Phase 3: 智能融合与重构 ----
 phase3:
-  dim: 64
-  num_heads: 4
+  dim: 96
+  num_heads: 6
   patch_size: 8          # Patch-based Cross-Attention（显存安全）
   lab_correction: true
 
@@ -87,7 +87,7 @@ loss:
   lambda_l1: 1.0
   lambda_ssim: 0.5
   lambda_vgg: 0.1
-  lambda_lab: 0.5
+  lambda_lab: 1.0
   lambda_retinex: 0.05
   lambda_d_mid: 0.3
   lambda_b_mid: 0.2
