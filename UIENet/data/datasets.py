@@ -4,10 +4,12 @@
 """
 
 import os
+import random
 from pathlib import Path
 from PIL import Image
 import torch
 from torch.utils.data import Dataset
+from torchvision import transforms
 
 
 class PairedDataset(Dataset):
@@ -37,16 +39,19 @@ class PairedDataset(Dataset):
         input_img = Image.open(input_path).convert('RGB')
         gt_img = Image.open(gt_path).convert('RGB')
 
-        # 同步增强：将两张图左右拼接后统一 transform
-        combined = Image.new('RGB', (input_img.width * 2, input_img.height))
-        combined.paste(input_img, (0, 0))
-        combined.paste(gt_img, (input_img.width, 0))
         if self.transform:
-            combined = self.transform(combined)
-            w = combined.shape[2] // 2
-            input_tensor = combined[:, :, :w]
-            gt_tensor = combined[:, :, w:]
-        return input_tensor, gt_tensor
+            seed = torch.randint(0, 2**31, (1,)).item()
+            torch.manual_seed(seed)
+            random.seed(seed)
+            input_tensor = self.transform(input_img)
+            torch.manual_seed(seed)
+            random.seed(seed)
+            gt_tensor = self.transform(gt_img)
+            return input_tensor, gt_tensor
+
+        # 无 transform 时的兜底
+        to_tensor = transforms.ToTensor()
+        return to_tensor(input_img), to_tensor(gt_img)
 
 
 class UnpairedDataset(Dataset):
