@@ -18,12 +18,11 @@ import kornia
 
 
 class PatchCrossAttention(nn.Module):
-    """Patch-based Cross-Attention，支持任意输入尺寸（自动 padding）"""
+    """Patch-based Cross-Attention v3.0 — 使用 SDPA (Flash Attention) 节省显存"""
     def __init__(self, dim, num_heads=4, patch_size=8):
         super().__init__()
         self.patch_size = patch_size
         self.num_heads = num_heads
-        self.scale = (dim // num_heads) ** -0.5
 
         self.q_proj = nn.Linear(dim, dim)
         self.k_proj = nn.Linear(dim, dim)
@@ -34,7 +33,7 @@ class PatchCrossAttention(nn.Module):
         B, C, H, W = query_feat.shape
         P = self.patch_size
 
-        # 确保能被 patch_size 整除
+        # Padding 到 patch_size 整数倍
         pad_h = (P - H % P) % P
         pad_w = (P - W % P) % P
         if pad_h > 0 or pad_w > 0:
@@ -42,30 +41,38 @@ class PatchCrossAttention(nn.Module):
             kv_feat = F.pad(kv_feat, (0, pad_w, 0, pad_h))
         Hp, Wp = query_feat.shape[2], query_feat.shape[3]
 
+        # Rearrange: (B,C,H,W) → patches → (B,N,T,C)
         q = einops.rearrange(query_feat, 'b c (h p1) (w p2) -> b (h w) (p1 p2) c',
                              p1=P, p2=P)
-        k = einops.rearrange(kv_feat,   'b c (h p1) (w p2) -> b (h w) (p1 p2) c',
+        k = einops.rearrange(kv_feat, 'b c (h p1) (w p2) -> b (h w) (p1 p2) c',
                              p1=P, p2=P)
-        v = k
+        v = k.clone()  # Cross-attention: K=V
 
-        q = self.q_proj(q)
+        # Project
+        q = self.q_proj(q)  # (B, N, T, C)
         k = self.k_proj(k)
         v = self.v_proj(v)
 
+        # SDPA: (B, N, H, T, D)
         q = einops.rearrange(q, 'b n t (h d) -> b n h t d', h=self.num_heads)
         k = einops.rearrange(k, 'b n t (h d) -> b n h t d', h=self.num_heads)
         v = einops.rearrange(v, 'b n t (h d) -> b n h t d', h=self.num_heads)
 
-        attn = torch.einsum('bnhtd,bnhsd->bnhts', q, k) * self.scale
-        attn = attn.softmax(dim=-1)
-        out = torch.einsum('bnhts,bnhsd->bnhtd', attn, v)
+        # Merge B*N into batch dim for SDPA
+        out = F.scaled_dot_product_attention(
+            q.reshape(-1, self.num_heads, q.shape[3], q.shape[4]),
+            k.reshape(-1, self.num_heads, k.shape[3], k.shape[4]),
+            v.reshape(-1, self.num_heads, v.shape[3], v.shape[4]),
+        )  # (B*N, H, T, D)
+        out = out.view(B, -1, self.num_heads, q.shape[3], q.shape[4])
 
+        # Merge heads
         out = einops.rearrange(out, 'b n h t d -> b n t (h d)')
         out = self.out_proj(out)
-        out = einops.rearrange(out, 'b (h w) (p1 p2) c -> b c (h p1) (w p2)',
-                               h=Hp//P, w=Wp//P, p1=P, p2=P)
 
-        # 裁剪回原尺寸
+        # Restore spatial
+        out = einops.rearrange(out, 'b (h w) (p1 p2) c -> b c (h p1) (w p2)',
+                               h=Hp // P, w=Wp // P, p1=P, p2=P)
         out = out[:, :, :H, :W].contiguous()
         return out
 
