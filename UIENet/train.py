@@ -155,13 +155,29 @@ def main():
     checkpoint_dir = Path(config.logging.checkpoint_dir)
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
+    # ---- 断点续训 ----
+    start_epoch = 0
     global_step = 0
+    if args.resume:
+        print(f"从检查点恢复: {args.resume}")
+        ckpt = torch.load(args.resume, map_location=device)
+        model.load_state_dict(ckpt['model_state_dict'])
+        discriminator.load_state_dict(ckpt['discriminator_state_dict'])
+        optimizer_G.load_state_dict(ckpt['optimizer_G_state_dict'])
+        optimizer_D.load_state_dict(ckpt['optimizer_D_state_dict'])
+        scheduler_G.load_state_dict(ckpt['scheduler_G_state_dict'])
+        scheduler_D.load_state_dict(ckpt['scheduler_D_state_dict'])
+        start_epoch = ckpt['epoch'] + 1
+        global_step = start_epoch * total_steps_per_epoch
+        ema = EMAModel(model, decay=config.training.ema_decay)  # EMA 不恢复，从头构建
+        print(f"  恢复到 epoch {start_epoch}, global_step {global_step}")
+
     scaler_G = torch.amp.GradScaler('cuda') if device.type == 'cuda' else None
     scaler_D = torch.amp.GradScaler('cuda') if device.type == 'cuda' else None
 
     gan_start_epoch = config.training.gan_start_epoch
 
-    for epoch in range(config.training.num_epochs):
+    for epoch in range(start_epoch, config.training.num_epochs):
         model.train()
         discriminator.train()
         epoch_loss_G = 0.0
