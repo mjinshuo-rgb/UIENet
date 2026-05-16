@@ -55,9 +55,11 @@ class BranchCBAM(nn.Module):
         self.channel_attn = ChannelAttention(dim, reduction)
         self.spatial_attn = SpatialAttention(spatial_kernel)
 
-        # FFN 精炼 + 残差
+        # FFN 精炼 + 残差（双层增强）
         self.out_conv = nn.Sequential(
-            nn.Conv2d(dim, dim, 3, padding=1),
+            nn.Conv2d(dim, dim * 2, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(dim * 2, dim, 3, padding=1),
             nn.ReLU(inplace=True),
             nn.Conv2d(dim, dim, 3, padding=1),
         )

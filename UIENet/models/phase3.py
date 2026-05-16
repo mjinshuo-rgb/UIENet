@@ -88,11 +88,13 @@ class FusionModule(nn.Module):
             nn.Conv2d(dim * 4, dim, 1),
             nn.ReLU(inplace=True),
         )
-        # FFN 精炼
+        # FFN 精炼（双层残差增强融合能力）
         self.ffn = nn.Sequential(
-            nn.Conv2d(dim, dim * 2, 3, padding=1),
+            nn.Conv2d(dim, dim * 4, 1),
             nn.ReLU(inplace=True),
-            nn.Conv2d(dim * 2, dim, 3, padding=1),
+            nn.Conv2d(dim * 4, dim * 4, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(dim * 4, dim, 1),
         )
 
     def forward(self, fa, fb, fc, fd):
