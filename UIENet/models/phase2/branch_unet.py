@@ -33,8 +33,11 @@ class BranchUNet(nn.Module):
         self.enc2 = ConvBlock(base, base * 2, stride=2)        # H/2, W/2
         self.enc3 = ConvBlock(base * 2, base * 4, stride=2)    # H/4, W/4
 
-        # 瓶颈（单层，参数分配给 Swin/Fusion）
-        self.bottleneck = ConvBlock(base * 4, base * 4)
+        # 瓶颈（双层残差，提供足够的多尺度特征提取能力）
+        self.bottleneck = nn.Sequential(
+            ConvBlock(base * 4, base * 4),
+            ConvBlock(base * 4, base * 4),
+        )
 
         # 解码器（上采样 + 跳连）
         self.up3 = nn.ConvTranspose2d(base * 4, base * 2, kernel_size=2, stride=2)
