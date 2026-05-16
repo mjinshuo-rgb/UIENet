@@ -83,7 +83,7 @@ class BranchFreq(nn.Module):
         if self.training:
             # 中间监督：生成 3 通道预测图并上采样到原始输入尺寸
             pred_b_mid = self.mid_supervision_head(fb)
-            pred_b_mid = F.interpolate(pred_b_mid, size=self.input_size,
+            pred_b_mid = F.interpolate(pred_b_mid, size=tuple(self.input_size),
                                        mode='bilinear', align_corners=False)
             return fb, pred_b_mid
         else:

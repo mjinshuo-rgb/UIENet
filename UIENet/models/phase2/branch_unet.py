@@ -76,7 +76,7 @@ class BranchUNet(nn.Module):
         if self.training:
             # 中间监督：从 mid_feat 生成 3 通道图并上采样到原图尺寸
             pred_d_mid = self.mid_supervision_head(mid_feat)
-            pred_d_mid = F.interpolate(pred_d_mid, size=self.input_size,
+            pred_d_mid = F.interpolate(pred_d_mid, size=tuple(self.input_size),
                                        mode='bilinear', align_corners=False)
             return fd, pred_d_mid
         else:
