@@ -10,17 +10,56 @@ import torch.nn.functional as F
 from losses.perceptual import VGGPerceptualLoss
 from losses.color import LABColorLoss
 
-try:
-    from pytorch_ssim import ssim
-except ImportError:
-    ssim = None
+
+def _gaussian_window(window_size, sigma, channels):
+    """创建 2D 高斯窗口用于 SSIM 计算"""
+    coords = torch.arange(window_size, dtype=torch.float32)
+    coords -= window_size // 2
+    g = torch.exp(-(coords ** 2) / (2 * sigma ** 2))
+    g /= g.sum()
+    window_1d = g.unsqueeze(0) * g.unsqueeze(1)  # outer product
+    window = window_1d.expand(channels, 1, window_size, window_size).contiguous()
+    return window
+
+
+def _ssim(img1, img2, window_size=11, sigma=1.5, C1=0.01**2, C2=0.03**2):
+    """
+    可微分 SSIM 计算（自实现，不依赖 pytorch_ssim）
+
+    Args:
+        img1, img2: (B, C, H, W) 张量
+        window_size: 高斯窗口尺寸
+        sigma: 高斯窗口标准差
+    Returns:
+        SSIM 均值（标量），值域 [0, 1]
+    """
+    channels = img1.size(1)
+    window = _gaussian_window(window_size, sigma, channels).to(img1.device).to(img1.dtype)
+    padding = window_size // 2
+
+    mu1 = F.conv2d(img1, window, padding=padding, groups=channels)
+    mu2 = F.conv2d(img2, window, padding=padding, groups=channels)
+    mu1_sq = mu1.pow(2)
+    mu2_sq = mu2.pow(2)
+    mu1_mu2 = mu1 * mu2
+
+    sigma1_sq = F.conv2d(img1 * img1, window, padding=padding, groups=channels) - mu1_sq
+    sigma2_sq = F.conv2d(img2 * img2, window, padding=padding, groups=channels) - mu2_sq
+    sigma12 = F.conv2d(img1 * img2, window, padding=padding, groups=channels) - mu1_mu2
+
+    ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / \
+               ((mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2))
+    return ssim_map.mean()
 
 
 class SSIMLoss(nn.Module):
+    def __init__(self, window_size=11, sigma=1.5):
+        super().__init__()
+        self.window_size = window_size
+        self.sigma = sigma
+
     def forward(self, pred, target):
-        if ssim is None:
-            raise ImportError("pytorch_ssim 未安装，请 pip install pytorch_ssim")
-        return 1.0 - ssim(pred, target)
+        return 1.0 - _ssim(pred, target, self.window_size, self.sigma)
 
 
 class TotalLoss(nn.Module):
