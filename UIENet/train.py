@@ -300,7 +300,8 @@ def main():
             ema.apply_shadow()
             torch.save({
                 'epoch': epoch,
-                'model_state_dict': model.state_dict(),
+                'model_state_dict': ema_backup,                  # 训练权重（匹配优化器状态）
+                'ema_state_dict': model.state_dict(),            # EMA 权重（单独存）
                 'discriminator_state_dict': discriminator.state_dict(),
                 'optimizer_G_state_dict': optimizer_G.state_dict(),
                 'optimizer_D_state_dict': optimizer_D.state_dict(),
@@ -308,7 +309,7 @@ def main():
                 'scheduler_D_state_dict': scheduler_D.state_dict(),
                 'config': config,
             }, checkpoint_dir / f'uienet_epoch{epoch+1}.pth')
-            model.load_state_dict(ema_backup)  # 恢复训练权重
+            model.load_state_dict(ema_backup)  # 恢复训练权重（EMA 已应用过，需恢复）
             print(f"  检查点已保存: uienet_epoch{epoch+1}.pth")
 
     writer.close()
