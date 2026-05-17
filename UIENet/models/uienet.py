@@ -1,12 +1,9 @@
 """
-UIENet: 水下图像增强主网络
+UIENet: 水下图像增强主网络 v4.0
 
-整合三阶段架构：
-- Phase 1: 物理感知与预处理（Retinex + 浑浊度估计）
-- Phase 2: 多域特征协同提取（Swin + FFT + CBAM + UNet）
-- Phase 3: 智能融合与重构（Patch Cross-Attention + LAB 校正）
-
-返回增强图像及必要的中间结果供损失计算。
+- Phase 1: 暗通道 + 浑浊度 + 多尺度CNN → 4分支专用投影
+- Phase 2: Swin/FFT/CBAM/UNet 各接收专用特征
+- Phase 3: 1×Cross-Attn + Conv融合 + LAB校正
 """
 
 import torch
@@ -29,18 +26,15 @@ class UIENet(nn.Module):
 
         返回字典:
         - 'output':          增强后图像 (B, 3, H, W)
-        - 'illumination':    Retinex 光照层
-        - 'reflectance':     Retinex 反射层
         - 'turbidity':       浑浊度地图
         - 'pred_b_mid':      分支 B 中间监督图（训练时有，推理时为 None）
         - 'pred_d_mid':      分支 D 中间监督图（训练时有，推理时为 None）
         """
-        # Phase 1
+        # Phase 1: 深度物理先验提取
         phase1_out = self.phase1(x)
-        prior_feat = phase1_out['prior_feat']
 
-        # Phase 2
-        phase2_out = self.phase2(prior_feat)
+        # Phase 2: 多域特征协同（各分支接收专用投影）
+        phase2_out = self.phase2(phase1_out)
         fa = phase2_out['fa']
         fb = phase2_out['fb']
         fc = phase2_out['fc']
@@ -48,13 +42,11 @@ class UIENet(nn.Module):
         pred_b_mid = phase2_out['pred_b_mid']
         pred_d_mid = phase2_out['pred_d_mid']
 
-        # Phase 3
+        # Phase 3: 融合与重构
         output = self.phase3(fa, fb, fc, fd, x)
 
         return {
             'output': output,
-            'illumination': phase1_out['illumination'],
-            'reflectance': phase1_out['reflectance'],
             'turbidity': phase1_out['turbidity'],
             'pred_b_mid': pred_b_mid,
             'pred_d_mid': pred_d_mid

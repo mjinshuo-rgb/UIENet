@@ -1,20 +1,16 @@
 # ============================================================
-# UIENet 配置文件 (v3.0 — 28dB+ 升级版)
-# 所有超参数集中管理，代码通过 omegaconf 点号访问
+# UIENet 配置文件 (v4.0 — 28dB+ 终极版)
 # ============================================================
 
 # ---- 基本设置 ----
 in_channels: 3
-num_classes: 3  # 输出通道数（RGB）
+num_classes: 3
 device: "cuda"
 
-# ---- Phase 1: 物理感知与预处理 ----
+# ---- Phase 1: 深度物理先验 ----
 phase1_feat_channels: 128
-phase1_retinex_mid_channels: 64
-phase1_density_mid_channels: 128
 
-# ---- Phase 2: 多域特征协同提取 ----
-# 分支 A: Swin Transformer
+# ---- Phase 2: 多域特征协同 ----
 branch_swin:
   embed_dim: 128
   window_size: 8
@@ -24,39 +20,37 @@ branch_swin:
   drop_rate: 0.0
   attn_drop_rate: 0.0
 
-# 分支 B: 频域解耦
 branch_freq:
   mid_channels: 128
   input_size: [384, 384]
 
-# 分支 C: CBAM 空域-注意力
 branch_cbam:
   reduction: 16
   spatial_kernel: 7
 
-# 分支 D: 轻量 U-Net
 branch_unet:
   base_channels: 128
   input_size: [384, 384]
 
-# ---- Phase 3: 智能融合与重构 ----
+# ---- Phase 3: 融合 + LAB ----
 phase3:
   dim: 128
   num_heads: 4
   patch_size: 8
   lab_correction: true
 
-# ---- 判别器 (PatchGAN) ----
+# ---- 判别器 ----
 discriminator:
   ndf: 64
   n_layers: 3
-  use_multi_scale: false  # 多尺度判别器（batch<8 不建议开启，易 OOM）
+  r1_gamma: 1.0              # R1 梯度惩罚系数（稳定 GAN 训练）
 
-# ---- 数据预处理 ----
+# ---- 数据 ----
 data:
   train_dirs:
     - "./datasets/EUVP/train"
     - "./datasets/UIEB/train_filtered"
+    - "./datasets/LSUI/test"        # v4.0: LSUI 加入训练，提升泛化
   test_dirs:
     euvp: "./datasets/EUVP/test"
     lsui: "./datasets/LSUI/test"
@@ -64,13 +58,12 @@ data:
   train_size: [384, 384]
   normalize_mean: [0.5, 0.5, 0.5]
   normalize_std:  [0.5, 0.5, 0.5]
-  random_crop: true
   horizontal_flip_prob: 0.5
-  vertical_flip_prob: 0.5
-  color_jitter:
-    brightness: 0.15
-    contrast: 0.15
-    saturation: 0.15
+  vertical_flip_prob: 0.3
+  color_jitter:                    # v4.0: 强增强提升 U90 泛化
+    brightness: 0.2
+    contrast: 0.2
+    saturation: 0.2
     hue: 0.1
 
 # ---- 训练超参数 ----
@@ -97,10 +90,10 @@ loss:
   lambda_ssim: 1.0
   lambda_vgg: 0.5
   lambda_lab: 1.0
-  lambda_gan: 0.1                    # 对抗损失权重
+  lambda_gan: 0.3                    # 对抗损失权重（v4.0 提升）
   lambda_gradient: 0.5               # 梯度损失（边缘锐度）
   lambda_frequency: 0.1              # 频域损失（纹理匹配）
-  lambda_retinex: 0.05
+  lambda_retinex: 0.0   # v4.0: Retinex 已移除
   lambda_d_mid: 0.5
   lambda_b_mid: 0.3
 

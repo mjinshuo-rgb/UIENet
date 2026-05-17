@@ -78,17 +78,32 @@ class PatchCrossAttention(nn.Module):
 
 
 class FusionModule(nn.Module):
-    """特征融合模块 v3.0：Cross-Attention + FFN 精炼"""
-    def __init__(self, dim=64, num_heads=4, patch_size=8):
+    """
+    特征融合模块 v4.0
+    - 1× Cross-Attention (FA×FB): 全局语义 × 频域信息 → 最关键融合
+    - FC/FD 用卷积融合替代 Cross-Attn，省显存且互补性不依赖注意力
+    - FFN 精炼 + 残差
+    """
+    def __init__(self, dim=128, num_heads=4, patch_size=8):
         super().__init__()
+        # 唯一保留的 Cross-Attention: Swin 查询 FFT → 语义+频域对齐
         self.ca_ab = PatchCrossAttention(dim, num_heads, patch_size)
-        self.ca_ac = PatchCrossAttention(dim, num_heads, patch_size)
-        self.ca_ad = PatchCrossAttention(dim, num_heads, patch_size)
+        # FC/FD 用轻量卷积融合
+        self.conv_c = nn.Sequential(
+            nn.Conv2d(dim * 2, dim, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(dim, dim, 3, padding=1),
+        )
+        self.conv_d = nn.Sequential(
+            nn.Conv2d(dim * 2, dim, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(dim, dim, 3, padding=1),
+        )
         self.fuse_conv = nn.Sequential(
             nn.Conv2d(dim * 4, dim, 1),
             nn.ReLU(inplace=True),
         )
-        # FFN 精炼（双层残差增强融合能力）
+        # FFN 精炼
         self.ffn = nn.Sequential(
             nn.Conv2d(dim, dim * 4, 1),
             nn.ReLU(inplace=True),
@@ -98,12 +113,14 @@ class FusionModule(nn.Module):
         )
 
     def forward(self, fa, fb, fc, fd):
+        # Cross-Attention: FA(query) × FB(key/value) → 全局-频域对齐
         out_ab = self.ca_ab(fa, fb)
-        out_ac = self.ca_ac(fa, fc)
-        out_ad = self.ca_ad(fa, fd)
-        fused = torch.cat([fa, out_ab, out_ac, out_ad], dim=1)
-        fused = self.fuse_conv(fused)
-        fused = self.ffn(fused) + fused  # 残差连接
+        # 卷积融合: FA + FC, FA + FD
+        out_ac = self.conv_c(torch.cat([fa, fc], dim=1))
+        out_ad = self.conv_d(torch.cat([fa, fd], dim=1))
+        # Concat + 压缩
+        fused = self.fuse_conv(torch.cat([fa, out_ab, out_ac, out_ad], dim=1))
+        fused = self.ffn(fused) + fused  # 残差
         return fused
 
 

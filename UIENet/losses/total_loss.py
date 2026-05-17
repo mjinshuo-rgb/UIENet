@@ -6,7 +6,6 @@
   - 色彩损失：LAB ab 通道
   - 对抗损失：LSGAN (PatchGAN)
   - 结构损失：梯度损失（边缘锐度）+ 频域损失（纹理匹配）
-  - 物理约束：Retinex 重建
   - 辅助损失：分支 B/D 中间监督
 所有权重从 config.yaml 读取。
 """
@@ -173,8 +172,6 @@ class TotalLoss(nn.Module):
             loss_dict:  各分量损失字典
         """
         pred_main = pred_dict['output']
-        illumination = pred_dict['illumination']
-        reflectance = pred_dict['reflectance']
         pred_b_mid = pred_dict['pred_b_mid']
         pred_d_mid = pred_dict['pred_d_mid']
 
@@ -195,12 +192,7 @@ class TotalLoss(nn.Module):
         # ---- 频域损失 ----
         loss_freq = frequency_loss(pred_main, target) * self.lambda_frequency
 
-        # ---- Retinex 重建约束 ----
-        input_01 = (input_img + 1.0) / 2.0
-        reconstruction = illumination * reflectance
-        loss_retinex = self.l1_loss(reconstruction, input_01) * self.lambda_retinex
-
-        loss_total = loss_main + loss_grad + loss_freq + loss_retinex
+        loss_total = loss_main + loss_grad + loss_freq
 
         # ---- 对抗损失 ----
         if use_gan and discriminator is not None:
@@ -231,7 +223,7 @@ class TotalLoss(nn.Module):
             'gradient': loss_grad,
             'frequency': loss_freq,
             'gan': loss_gan,
-            'retinex': loss_retinex,
+            'retinex': torch.tensor(0.0, device=loss_total.device),
             'b_mid': loss_b_mid,
             'd_mid': loss_d_mid,
         }
