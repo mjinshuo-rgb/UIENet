@@ -9,6 +9,8 @@ device: "cuda"
 
 # ---- Phase 1: 深度物理先验 ----
 phase1_feat_channels: 128
+phase1_retinex_mid_channels: 48
+phase1_density_mid_channels: 64
 
 # ---- Phase 2: 多域特征协同 ----
 branch_swin:
@@ -93,7 +95,7 @@ loss:
   lambda_gan: 0.3                    # 对抗损失权重（v4.0 提升）
   lambda_gradient: 0.5               # 梯度损失（边缘锐度）
   lambda_frequency: 0.1              # 频域损失（纹理匹配）
-  lambda_retinex: 0.0   # v4.0: Retinex 已移除
+  lambda_retinex: 0.05
   lambda_d_mid: 0.5
   lambda_b_mid: 0.3
 

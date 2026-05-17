@@ -47,6 +47,8 @@ class UIENet(nn.Module):
 
         return {
             'output': output,
+            'illumination': phase1_out['illumination'],
+            'reflectance': phase1_out['reflectance'],
             'turbidity': phase1_out['turbidity'],
             'pred_b_mid': pred_b_mid,
             'pred_d_mid': pred_d_mid

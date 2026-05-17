@@ -172,6 +172,8 @@ class TotalLoss(nn.Module):
             loss_dict:  各分量损失字典
         """
         pred_main = pred_dict['output']
+        illumination = pred_dict['illumination']
+        reflectance = pred_dict['reflectance']
         pred_b_mid = pred_dict['pred_b_mid']
         pred_d_mid = pred_dict['pred_d_mid']
 
@@ -192,7 +194,12 @@ class TotalLoss(nn.Module):
         # ---- 频域损失 ----
         loss_freq = frequency_loss(pred_main, target) * self.lambda_frequency
 
-        loss_total = loss_main + loss_grad + loss_freq
+        # ---- Retinex 重建约束 ----
+        input_01 = (input_img + 1.0) / 2.0
+        reconstruction = illumination * reflectance
+        loss_retinex = self.l1_loss(reconstruction, input_01) * self.lambda_retinex
+
+        loss_total = loss_main + loss_grad + loss_freq + loss_retinex
 
         # ---- 对抗损失 ----
         if use_gan and discriminator is not None:
@@ -223,7 +230,7 @@ class TotalLoss(nn.Module):
             'gradient': loss_grad,
             'frequency': loss_freq,
             'gan': loss_gan,
-            'retinex': torch.tensor(0.0, device=loss_total.device),
+            'retinex': loss_retinex,
             'b_mid': loss_b_mid,
             'd_mid': loss_d_mid,
         }

@@ -1,17 +1,12 @@
 """
-Phase 1: 深度物理先验提取 v4.0
+Phase 1: 可学习物理先验提取 v4.1
 
-核心改进：
-1. 去掉无监督 Retinex
-2. 暗通道先验 + 可学习浑浊度估计器
-3. 3 级 CNN 深度特征提取，打破 1x1 信息瓶颈
-4. 每个 Phase2 分支接收不同感受野的投影
+三个可学习物理先验：
+1. Retinex 分解（I x R approx input，自监督重建约束）
+2. 暗通道 + 密度估计器（硬先验辅助，提升浑浊度估计精度）
+3. 3 级 CNN 深度特征提取 + 4 分支专用投影
 
-分支专用投影:
-   - Swin: dilation=2 (大感受野)
-   - FFT:  Identity (频域自处理)
-   - CBAM: 3x3 conv (局部空间)
-   - UNet: 1x1 + residual (保真细节)
+对比 v4.0：恢复 Retinex 作为可学习先验，暗通道仅辅助浑浊度估计
 """
 
 import torch
@@ -19,16 +14,47 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 
+class RetinexDecompose(nn.Module):
+    """Retinex 分解: 输入 [-1,1] -> illumination [0,1], reflectance [0,1]"""
+    def __init__(self, in_channels=3, mid_channels=48, out_channels=3):
+        super().__init__()
+        self.shared = nn.Sequential(
+            nn.Conv2d(in_channels, mid_channels, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(mid_channels, mid_channels, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(mid_channels, mid_channels, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(mid_channels, mid_channels, 3, padding=1),
+            nn.ReLU(inplace=True),
+        )
+        self.illum_head = nn.Sequential(
+            nn.Conv2d(mid_channels, mid_channels // 2, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(mid_channels // 2, out_channels, 1),
+            nn.Sigmoid()
+        )
+        self.reflect_head = nn.Sequential(
+            nn.Conv2d(mid_channels, mid_channels // 2, 3, padding=1),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(mid_channels // 2, out_channels, 1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        feat = self.shared(x)
+        return self.illum_head(feat), self.reflect_head(feat)
+
+
 class DarkChannel(nn.Module):
+    """暗通道: 15x15 min(R,G,B)，无参数"""
     def __init__(self, patch_size=15):
         super().__init__()
         self.patch_size = patch_size
 
     def forward(self, x):
         x_01 = (x + 1.0) / 2.0
-        B = x_01.shape[0]
-        P = self.patch_size
-        pad = P // 2
+        P = self.patch_size; pad = P // 2
         x_pad = F.pad(x_01, (pad, pad, pad, pad), mode='reflect')
         patches = x_pad.unfold(2, P, 1).unfold(3, P, 1)
         dark = patches.min(dim=1)[0].min(dim=-1)[0].min(dim=-1)[0]
@@ -36,6 +62,7 @@ class DarkChannel(nn.Module):
 
 
 class TurbidityEstimator(nn.Module):
+    """浑浊度估计: RGB[0,1] + dark -> 密度图 [0,1]"""
     def __init__(self, in_channels=4, mid_channels=64):
         super().__init__()
         self.stem = nn.Sequential(
@@ -68,7 +95,8 @@ class TurbidityEstimator(nn.Module):
 
 
 class DeepFeatureExtractor(nn.Module):
-    def __init__(self, in_channels=5, base=128):
+    """3级 CNN: 8ch(RGB+illum+reflect+dark+turbidity) -> 128ch -> 分支专用投影"""
+    def __init__(self, in_channels=11, base=128):
         super().__init__()
         self.conv1 = nn.Sequential(
             nn.Conv2d(in_channels, base, 3, padding=1),
@@ -90,7 +118,6 @@ class DeepFeatureExtractor(nn.Module):
         )
         self.upsample = nn.Upsample(scale_factor=2, mode='bilinear', align_corners=False)
 
-        # Branch-specific projections
         self.proj_swin = nn.Sequential(
             nn.Conv2d(base, base, 3, padding=2, dilation=2),
             nn.ReLU(inplace=True),
@@ -114,10 +141,8 @@ class DeepFeatureExtractor(nn.Module):
         f3 = self.conv3(f2)
         feat = f1 + self.upsample(f3)
         return {
-            'fa': self.proj_swin(feat),
-            'fb': self.proj_freq(feat),
-            'fc': self.proj_cbam(feat),
-            'fd': self.proj_unet(feat),
+            'fa': self.proj_swin(feat), 'fb': self.proj_freq(feat),
+            'fc': self.proj_cbam(feat), 'fd': self.proj_unet(feat),
         }
 
 
@@ -125,18 +150,21 @@ class Phase1(nn.Module):
     def __init__(self, config):
         super().__init__()
         feat_channels = config.phase1_feat_channels
+        self.retinex = RetinexDecompose(3, config.phase1_retinex_mid_channels, 3)
         self.dark_channel = DarkChannel(patch_size=15)
-        self.turbidity = TurbidityEstimator(in_channels=4, mid_channels=64)
-        self.extractor = DeepFeatureExtractor(in_channels=5, base=feat_channels)
+        self.turbidity = TurbidityEstimator(in_channels=4, mid_channels=config.phase1_density_mid_channels)
+        self.extractor = DeepFeatureExtractor(in_channels=11, base=feat_channels)
 
     def forward(self, x):
-        dark = self.dark_channel(x)
         x_01 = (x + 1.0) / 2.0
+        illumination, reflectance = self.retinex(x_01)
+        dark = self.dark_channel(x)
         turbidity = self.turbidity(torch.cat([x_01, dark], dim=1))
-        prior_input = torch.cat([x_01, dark, turbidity], dim=1)
+        prior_input = torch.cat([x_01, illumination, reflectance, dark, turbidity], dim=1)
         branch_feats = self.extractor(prior_input)
         return {
             'fa': branch_feats['fa'], 'fb': branch_feats['fb'],
             'fc': branch_feats['fc'], 'fd': branch_feats['fd'],
+            'illumination': illumination, 'reflectance': reflectance,
             'turbidity': turbidity,
         }
