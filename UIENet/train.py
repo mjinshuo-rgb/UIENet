@@ -26,6 +26,7 @@ from utils.config import load_config
 from models.uienet import UIENet
 from models.discriminator import PatchGANDiscriminator
 from losses.total_loss import TotalLoss, discriminator_gan_loss
+from data.datasets import PairedDataset
 
 
 def get_transforms(config, train=True):
