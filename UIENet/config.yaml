@@ -74,7 +74,7 @@ training:
   gradient_accumulation: 4           # 等效 batch_size = 8
   num_epochs: 100
   learning_rate: 2.0e-4              # 生成器学习率
-  d_learning_rate: 1.0e-4            # 判别器学习率
+  d_learning_rate: 2.0e-4            # 判别器学习率（与G同级，防止崩溃）
   weight_decay: 1.0e-4
   betas: [0.5, 0.999]               # Adam betas（GAN 常用 0.5）
   scheduler: CosineAnnealingLR
@@ -92,7 +92,7 @@ loss:
   lambda_ssim: 1.0
   lambda_vgg: 0.5
   lambda_lab: 1.0
-  lambda_gan: 0.3                    # 对抗损失权重（v4.0 提升）
+  lambda_gan: 0.05                    # 对抗损失（轻量纹理信号）
   lambda_gradient: 0.5               # 梯度损失（边缘锐度）
   lambda_frequency: 0.1              # 频域损失（纹理匹配）
   lambda_retinex: 0.05
